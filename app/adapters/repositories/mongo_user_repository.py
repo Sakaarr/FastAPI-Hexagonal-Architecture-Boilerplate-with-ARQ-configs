@@ -70,5 +70,6 @@ class MongoUserRepository(UserRepository):
         return User(
             id=str(doc["_id"]),
             name=doc["name"],
-            email=doc["email"]
+            email=doc["email"],
+            password_hash=doc.get("password_hash"),
         )

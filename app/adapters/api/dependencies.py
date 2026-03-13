@@ -14,6 +14,8 @@
 ║  │  4  │  API key auth             (verify_api_key)           │  ║
 ║  │  5  │  Dependency chains        (repo → db → settings)     │  ║
 ║  │  6  │  Overrides for testing    (shown in test file)       │  ║
+║  │  7  │  JWT auth + current user  (get_current_user)         │  ║
+║  │  8  │  Password hasher          (get_password_hasher)      │  ║
 ║  └─────┴───────────────────────────────────────────────────────┘  ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
@@ -21,6 +23,7 @@
 import time
 import logging
 from fastapi import Depends, Request, HTTPException, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Annotated
 
 from app.infrastructure.config import Settings, get_settings
@@ -30,32 +33,28 @@ from app.adapters.repositories.mongo_product_repository import MongoProductRepos
 from app.domain.repositories.user_repository import UserRepository
 from app.domain.repositories.product_repository import ProductRepository
 from app.domain.task_queue import TaskQueue
+from app.domain.password_hasher import PasswordHasher
+from app.domain.entities.user import User
 from app.adapters.task_queue.arq_task_queue import ArqTaskQueue
+from app.infrastructure.security.password_hasher import BcryptPasswordHasher
+from app.infrastructure.security.jwt_handler import decode_access_token
 
 logger = logging.getLogger("app")
+
+
+# ── HTTP Bearer scheme for JWT ──
+# This tells FastAPI/OpenAPI that we expect a Bearer token
+# in the Authorization header. Enables the 🔒 button in /docs.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # ═══════════════════════════════════════════════════════════════
 #  PATTERN 2: Repository Providers
 # ═══════════════════════════════════════════════════════════════
-#
-#  Instead of doing `repo = MongoUserRepository()` at the top of
-#  your router (HARDCODED), we create provider functions.
-#
-#  WHY THIS MATTERS:
-#  - The router never knows WHICH repository it's using
-#  - You can swap MongoDB for PostgreSQL by changing ONE function
-#  - In tests, you override this to return FakeUserRepository
-# ═══════════════════════════════════════════════════════════════
 
 def get_user_repo() -> UserRepository:
     """
     Provides a UserRepository implementation.
-
-    CURRENT: Returns MongoUserRepository
-    TO SWAP: Just change the return to PostgresUserRepository()
-             or any other implementation of UserRepository.
-
     In tests, this gets overridden to return FakeUserRepository.
     """
     return MongoUserRepository()
@@ -72,17 +71,7 @@ def get_product_repo() -> ProductRepository:
 def get_task_queue(request: Request) -> TaskQueue | None:
     """
     Provides a TaskQueue implementation (arq + Redis).
-
-    LEARNING POINT — Accessing app.state:
-    ───────────────────────────────────────
-    The arq Redis pool is created in main.py's lifespan and
-    stored on app.state.arq_pool. This dependency reads it
-    from the Request object (request.app.state).
-
-    Returns None if Redis is not connected, so the app still
-    works — just without background emails.
-
-    In tests, this gets overridden to return FakeTaskQueue.
+    Returns None if Redis is not connected.
     """
     pool = getattr(request.app.state, "arq_pool", None)
     if pool:
@@ -91,52 +80,41 @@ def get_task_queue(request: Request) -> TaskQueue | None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PATTERN 3: Request Logging Dependency (Cross-Cutting Concern)
-# ═══════════════════════════════════════════════════════════════
-#
-#  This dependency doesn't return a "service" — instead it
-#  performs a SIDE EFFECT (logging) before the endpoint runs.
-#
-#  WHY?
-#  - Keeps logging logic out of every endpoint
-#  - Can be applied per-router or globally
-#  - Easy to add timing, request IDs, etc.
+#  PATTERN 8: Password Hasher Provider
 # ═══════════════════════════════════════════════════════════════
 
-async def log_request(request: Request):
+def get_password_hasher() -> PasswordHasher:
     """
-    Logs every incoming request with method, path, and client IP.
+    Provides a PasswordHasher implementation.
+
+    CURRENT: Returns BcryptPasswordHasher (production-grade)
+    IN TESTS: Override to return FakePasswordHasher (fast, no bcrypt)
 
     LEARNING POINT:
     ─────────────────
-    FastAPI auto-injects the `Request` object — you don't need
-    to declare it in your endpoint. This dependency receives it
-    automatically because FastAPI recognizes the type hint.
-
-    This is a "fire-and-forget" dependency — it doesn't return
-    anything useful, it just performs a side effect.
+    Same pattern as repositories. The use case depends on
+    the abstract PasswordHasher port. In production it gets
+    bcrypt, in tests it gets a fast fake.
     """
+    return BcryptPasswordHasher()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PATTERN 3: Request Logging (Cross-Cutting Concern)
+# ═══════════════════════════════════════════════════════════════
+
+async def log_request(request: Request):
+    """Logs every incoming request with method, path, and client IP."""
     start_time = time.time()
     logger.info(
         f"📥 {request.method} {request.url.path} "
         f"from {request.client.host if request.client else 'unknown'}"
     )
-
-    # We yield to let the dependency be used as a context manager
-    # but since we don't need cleanup, we just return
     return {"start_time": start_time, "path": request.url.path}
 
 
 # ═══════════════════════════════════════════════════════════════
 #  PATTERN 4: API Key Authentication (Security Guard)
-# ═══════════════════════════════════════════════════════════════
-#
-#  This dependency checks the request for a valid API key.
-#  If missing or invalid, it raises HTTPException (401/403).
-#
-#  DEPENDENCY CHAIN (Pattern 5):
-#     verify_api_key → depends on → get_settings
-#  The settings are injected INTO this dependency automatically!
 # ═══════════════════════════════════════════════════════════════
 
 async def verify_api_key(
@@ -145,24 +123,7 @@ async def verify_api_key(
 ):
     """
     Validates the API key from the X-API-Key header.
-
-    LEARNING POINT — DEPENDENCY CHAIN:
-    ────────────────────────────────────
-    Notice that this dependency ITSELF depends on `get_settings`.
-    FastAPI resolves the chain automatically:
-
-        endpoint
-           ↓ Depends(verify_api_key)
-        verify_api_key
-           ↓ Depends(get_settings)
-        get_settings → returns Settings object
-
-    So when your endpoint uses Depends(verify_api_key), FastAPI:
-    1. First calls get_settings() to get the Settings
-    2. Then calls verify_api_key(settings=...) with that result
-    3. Then calls your endpoint if auth passes
-
-    This is Pattern 5 (Dependency Chains) in action!
+    Dependency chain: verify_api_key → get_settings
     """
     if x_api_key is None:
         raise HTTPException(
@@ -180,18 +141,88 @@ async def verify_api_key(
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PATTERN 5: Dependency Chains (Composed Dependencies)
+#  PATTERN 7: JWT Authentication — get_current_user
 # ═══════════════════════════════════════════════════════════════
 #
-#  A dependency can depend on OTHER dependencies. FastAPI
-#  resolves the entire chain automatically and caches results
-#  within a single request.
+#  This is the most complex dependency chain:
 #
-#  Example chain:  get_current_request_info
-#                     ↓ depends on
-#                  log_request  +  get_settings
-#                     ↓                ↓
-#                  Request          @lru_cache
+#     get_current_user
+#        ↓ depends on
+#     bearer_scheme (extracts Bearer token from header)
+#        ↓ depends on
+#     get_user_repo (to look up the user by ID)
+#
+#  The result is the full User object — injected into any
+#  endpoint that declares `current_user: CurrentUserDep`.
+# ═══════════════════════════════════════════════════════════════
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    repo: UserRepository = Depends(get_user_repo),
+) -> User:
+    """
+    Extracts, verifies the JWT token, and returns the current user.
+
+    DEPENDENCY CHAIN:
+    ─────────────────
+    1. bearer_scheme extracts token from: Authorization: Bearer <token>
+    2. decode_access_token verifies the JWT signature + expiry
+    3. user_id is extracted from the "sub" claim
+    4. User is looked up in the database via the injected repo
+    5. The User object is returned — or 401 is raised
+
+    LEARNING POINT:
+    ─────────────────
+    This dependency combines MULTIPLE patterns:
+    - Pattern 2: Repository injection (to look up the user)
+    - Pattern 5: Dependency chain (bearer → decode → repo)
+    - Pattern 7: JWT authentication (new!)
+
+    If ANY step fails, HTTPException(401) is raised and the
+    endpoint never executes. This is the guard pattern.
+    """
+    # ── Step 1: Check for token ──
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated. Include 'Authorization: Bearer <token>' header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+
+    # ── Step 2: Decode and verify JWT ──
+    payload = decode_access_token(token)
+    if payload is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # ── Step 3: Extract user_id from token ──
+    user_id: str = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Token payload is invalid (missing 'sub').",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # ── Step 4: Look up user in database ──
+    user = await repo.get(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found. Token may be for a deleted account.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PATTERN 5: Dependency Chains (Composed Dependencies)
 # ═══════════════════════════════════════════════════════════════
 
 async def get_current_request_info(
@@ -199,23 +230,7 @@ async def get_current_request_info(
     settings: Settings = Depends(get_settings),
     log_data: dict = Depends(log_request),
 ):
-    """
-    A composed dependency that combines multiple other dependencies.
-
-    LEARNING POINT:
-    ─────────────────
-    This single dependency triggers a chain:
-    1. get_settings() is called  → returns Settings
-    2. log_request() is called   → logs the request and returns timing data
-    3. This function combines everything into a rich context object
-
-    Your endpoint receives all this context with a single Depends() call.
-
-    CACHING WITHIN A REQUEST:
-    FastAPI caches dependency results within a single request.
-    If two dependencies both Depends(get_settings), it's only
-    called ONCE — the same Settings instance is reused.
-    """
+    """A composed dependency that combines multiple other dependencies."""
     elapsed = time.time() - log_data["start_time"]
     return {
         "app_name": settings.app_name,
@@ -229,15 +244,11 @@ async def get_current_request_info(
 # ═══════════════════════════════════════════════════════════════
 #  TYPE ALIASES (Annotated dependencies for cleaner signatures)
 # ═══════════════════════════════════════════════════════════════
-#
-#  Instead of writing Depends(...) in every endpoint, you can
-#  create type aliases. This keeps endpoint signatures clean.
-# ═══════════════════════════════════════════════════════════════
 
-# Use these in endpoint signatures for cleaner code:
-#   async def create_user(repo: UserRepoDep, name: str, email: str):
 UserRepoDep = Annotated[UserRepository, Depends(get_user_repo)]
 ProductRepoDep = Annotated[ProductRepository, Depends(get_product_repo)]
 TaskQueueDep = Annotated[TaskQueue | None, Depends(get_task_queue)]
+PasswordHasherDep = Annotated[PasswordHasher, Depends(get_password_hasher)]
+CurrentUserDep = Annotated[User, Depends(get_current_user)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RequestInfoDep = Annotated[dict, Depends(get_current_request_info)]

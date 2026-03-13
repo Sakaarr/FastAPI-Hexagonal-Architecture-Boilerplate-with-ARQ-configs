@@ -8,7 +8,7 @@
 ║  To start the worker:                                        ║
 ║    arq app.infrastructure.arq_worker.WorkerSettings          ║
 ║                                                              ║
-║  The worker runs as a SEPARATE process from FastAPI.          ║
+║  The worker runs as a SEPARATE process from FastAPI.         ║
 ║  FastAPI enqueues jobs → Redis → Worker picks them up.       ║
 ╚══════════════════════════════════════════════════════════════╝
 """

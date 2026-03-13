@@ -19,6 +19,7 @@ from arq.connections import RedisSettings
 
 from app.adapters.api.user_router import router as user_router
 from app.adapters.api.product_router import router as product_router
+from app.adapters.api.auth_router import router as auth_router
 from app.infrastructure.config import get_settings
 
 
@@ -106,6 +107,7 @@ async def value_error_handler(request: Request, exc: ValueError):
 # ── Register routers ──
 app.include_router(user_router)
 app.include_router(product_router)
+app.include_router(auth_router)
 
 
 # ── Health check endpoint ──

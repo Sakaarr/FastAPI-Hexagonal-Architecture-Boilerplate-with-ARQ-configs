@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # ── Security ──
     api_key: str = "dev-secret-key-change-in-production"
 
+    # ── JWT Authentication ──
+    jwt_secret_key: str = "super-secret-change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_minutes: int = 30
+
     # ── Rate Limiting ──
     max_requests_per_minute: int = 60
 
