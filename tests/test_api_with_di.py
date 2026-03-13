@@ -21,12 +21,19 @@ from app.adapters.api.dependencies import (
     get_user_repo,
     get_product_repo,
     get_task_queue,
+    get_current_user,
+    get_password_hasher,
     verify_api_key,
 )
+from app.domain.entities.user import User
+from app.domain.repositories.product_repository import ProductRepository
+from app.domain.task_queue import TaskQueue
+from app.domain.password_hasher import PasswordHasher
 from tests.fake_repositories import (
     FakeUserRepository,
     FakeProductRepository,
     FakeTaskQueue,
+    FakePasswordHasher,
 )
 
 
@@ -64,6 +71,13 @@ def override_dependencies():
     app.dependency_overrides[get_user_repo] = lambda: _fake_user_repo
     app.dependency_overrides[get_product_repo] = lambda: _fake_product_repo
     app.dependency_overrides[get_task_queue] = lambda: _fake_task_queue
+    app.dependency_overrides[get_password_hasher] = lambda: FakePasswordHasher()
+
+    # ── OVERRIDE: Mock Authenticated User ──
+    # This ensures any endpoint using CurrentUserDep gets a dummy user
+    # for all tests by default.
+    dummy_user = User(id="test-id", name="Tester", email="test@example.com")
+    app.dependency_overrides[get_current_user] = lambda: dummy_user
 
     # ── OVERRIDE: Skip auth for most tests ──
     # This replaces verify_api_key with a no-op, so tests don't

@@ -29,6 +29,7 @@ from app.adapters.api.dependencies import (
     RequestInfoDep,       # Pattern 5: Chained dependency
     log_request,          # Pattern 3: Request logging
     verify_api_key,       # Pattern 4: API key auth
+    get_current_user,     # Pattern 7: JWT auth + current user
 )
 
 # ── The router itself can have dependencies! ──
