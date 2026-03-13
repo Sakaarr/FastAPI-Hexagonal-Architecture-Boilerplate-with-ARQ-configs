@@ -17,8 +17,8 @@ from app.application.use_cases.update_product import UpdateProduct
 
 from app.adapters.api.dependencies import (
     ProductRepoDep,       # Pattern 2: Repository injection
+    CurrentUserDep,       # Pattern 7: JWT Authentication
     log_request,          # Pattern 3: Request logging
-    verify_api_key,       # Pattern 4: Auth guard
 )
 
 
@@ -43,26 +43,36 @@ async def get_product(product_id: str, repo: ProductRepoDep):
     return await use_case.execute(product_id)
 
 
-# ── Protected endpoints (require API key) ──
+# ── Protected endpoints (require JWT Authentication) ──
 
-@router.post("/", dependencies=[Depends(verify_api_key)])
+@router.post("/")
 async def create_product(
     name: str,
     price: float,
     repo: ProductRepoDep,
+    current_user: CurrentUserDep, # Injects the User object if JWT is valid
     description: str = None,
 ):
+    """
+    Create a new product.
+    Requires a valid JWT token (Authorization: Bearer <token>).
+    """
     use_case = CreateProduct(repo)
     return await use_case.execute(name, price, description)
 
 
-@router.put("/{product_id}", dependencies=[Depends(verify_api_key)])
+@router.put("/{product_id}")
 async def update_product(
     product_id: str,
     name: str,
     price: float,
     repo: ProductRepoDep,
+    current_user: CurrentUserDep, # Injects the User object if JWT is valid
     description: str = None,
 ):
+    """
+    Update a product.
+    Requires a valid JWT token.
+    """
     use_case = UpdateProduct(repo)
     return await use_case.execute(product_id, name, price, description)

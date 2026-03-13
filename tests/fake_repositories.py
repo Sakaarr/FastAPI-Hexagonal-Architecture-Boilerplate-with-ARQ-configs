@@ -14,8 +14,19 @@ from app.domain.repositories.user_repository import UserRepository
 
 from app.domain.entities.product import Product
 from app.domain.repositories.product_repository import ProductRepository
-
 from app.domain.task_queue import TaskQueue
+from app.domain.password_hasher import PasswordHasher
+
+class FakePasswordHasher(PasswordHasher):
+    """
+    Fast password hasher for testing — no salt or rounds.
+    Just appends '[HASHED]' to the password.
+    """
+    def hash(self, password: str) -> str:
+        return f"{password}[HASHED]"
+
+    def verify(self, password: str, password_hash: str) -> bool:
+        return password_hash == f"{password}[HASHED]"
 
 
 class FakeTaskQueue(TaskQueue):
